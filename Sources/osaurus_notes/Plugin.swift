@@ -54,6 +54,7 @@ protocol Tool {
   var id: String { get }
   var description: String { get }
   var parameters: String { get }
+  var requirements: [String] { get }
   func run(args: String) -> String
 }
 
@@ -76,6 +77,10 @@ struct ListNotesTool: Tool {
 
   struct Args: Decodable {
     let limit: Int?
+  }
+
+  var requirements: [String] {
+    return ["notes"]
   }
 
   func run(args: String) -> String {
@@ -155,6 +160,10 @@ struct SearchNotesTool: Tool {
 
   struct Args: Decodable {
     let query: String
+  }
+
+  var requirements: [String] {
+    return ["notes"]
   }
 
   func run(args: String) -> String {
@@ -243,6 +252,10 @@ struct CreateNoteTool: Tool {
     let title: String
     let body: String
     let folder: String?
+  }
+
+  var requirements: [String] {
+    return ["notes"]
   }
 
   func run(args: String) -> String {
@@ -422,12 +435,14 @@ private var api: osr_plugin_api = {
 
     // Build tools JSON
     let toolsJson = ctx.tools.values.map { tool -> String in
+      let requirementsJson =
+        "[" + tool.requirements.map { "\"\($0)\"" }.joined(separator: ", ") + "]"
       return """
         {
             "id": "\(tool.id)",
             "description": "\(tool.description)",
             "parameters": \(tool.parameters),
-            "requirements": [],
+            "requirements": \(requirementsJson),
             "permission_policy": "ask"
         }
         """
