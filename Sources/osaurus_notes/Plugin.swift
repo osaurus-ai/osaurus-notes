@@ -451,8 +451,12 @@ private var api: osr_plugin_api = {
     let manifest = """
       {
         "plugin_id": "osaurus.notes",
-        "version": "0.1.0",
+        "name": "Apple Notes",
         "description": "Integration with Apple Notes",
+        "license": "MIT",
+        "authors": ["Dinoki Labs"],
+        "min_macos": "13.0",
+        "min_osaurus": "0.5.0",
         "capabilities": {
           "tools": [
             \(toolsJson)
