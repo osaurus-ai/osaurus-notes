@@ -85,8 +85,10 @@ struct ManifestTests {
     let map = try toolMap(from: loadManifest())
 
     let searchParams = map["search_notes"]?["parameters"] as? [String: Any]
+    let searchProperties = searchParams?["properties"] as? [String: Any]
     let searchRequired = searchParams?["required"] as? [String] ?? []
     #expect(searchRequired.contains("query"))
+    #expect(searchProperties?["limit"] != nil)
 
     let createParams = map["create_note"]?["parameters"] as? [String: Any]
     let createRequired = Set(createParams?["required"] as? [String] ?? [])

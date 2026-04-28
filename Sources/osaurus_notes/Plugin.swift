@@ -152,6 +152,10 @@ struct SearchNotesTool: Tool {
             "query": {
                 "type": "string",
                 "description": "Text to search for in notes"
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of matching notes to return (default: 50, max: 50)"
             }
         },
         "required": ["query"]
@@ -160,6 +164,7 @@ struct SearchNotesTool: Tool {
 
   struct Args: Decodable {
     let query: String
+    let limit: Int?
   }
 
   var requirements: [String] {
@@ -174,7 +179,7 @@ struct SearchNotesTool: Tool {
     }
 
     let searchTerm = input.query.lowercased().replacingOccurrences(of: "\"", with: "\\\"")
-    let maxNotes = 50
+    let maxNotes = max(1, min(input.limit ?? 50, 50))
     let maxPreview = 200
 
     let script = """
