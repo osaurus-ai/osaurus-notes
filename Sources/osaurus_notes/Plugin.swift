@@ -55,13 +55,20 @@ protocol Tool {
   var description: String { get }
   var parameters: String { get }
   var requirements: [String] { get }
+  /// opt-in flag: when true, this tool appears in the dashboard's add-widget picker
+  var widget: Bool { get }
   func run(args: String) -> String
+}
+
+extension Tool {
+  var widget: Bool { false }
 }
 
 // Tool Definitions
 
 struct ListNotesTool: Tool {
   let id = "list_notes"
+  let widget = true
   let description = "Get all notes from Notes app (limited count)"
   let parameters = """
     {
@@ -437,9 +444,11 @@ private var api: osr_plugin_api = {
     let toolsJson = ctx.tools.values.map { tool -> String in
       let requirementsJson =
         "[" + tool.requirements.map { "\"\($0)\"" }.joined(separator: ", ") + "]"
+      let widgetField = tool.widget ? "\"widget\": true," : ""
       return """
         {
             "id": "\(tool.id)",
+            \(widgetField)
             "description": "\(tool.description)",
             "parameters": \(tool.parameters),
             "requirements": \(requirementsJson),
