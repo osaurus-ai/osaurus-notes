@@ -43,8 +43,16 @@ class AppleScriptExecutor {
     return run(source)?.stringValue
   }
 
-  // Helper to extract list of notes from NSAppleEventDescriptor
-  // static func parseNotesList(_ descriptor: NSAppleEventDescriptor) -> [Note] { ... } - REMOVED unused
+  /// Escapes a string so it can be safely embedded inside an AppleScript
+  /// double-quoted string literal. Backslashes must be escaped first, then
+  /// double quotes, otherwise interpolated user input can break out of the
+  /// literal and corrupt the script.
+  static func escapeForAppleScript(_ s: String) -> String {
+    return
+      s
+      .replacingOccurrences(of: "\\", with: "\\\\")
+      .replacingOccurrences(of: "\"", with: "\\\"")
+  }
 
 }
 
@@ -126,24 +134,30 @@ struct ListNotesTool: Tool {
       """
 
     guard let result = AppleScriptExecutor.run(script) else {
-      return "{\"error\": \"Failed to execute AppleScript\"}"
+      return Envelope.failure(
+        .unavailable,
+        "Failed to execute AppleScript against Notes. The Notes app may not be running or permission was denied.",
+        retryable: false)
     }
 
     var notes: [Note] = []
     let numItems = result.numberOfItems
 
-    for i in 1...numItems {
-      if let noteData = result.atIndex(i), noteData.numberOfItems >= 2 {
-        let name = noteData.atIndex(1)?.stringValue ?? "Untitled"
-        let content = noteData.atIndex(2)?.stringValue ?? ""
-        notes.append(Note(name: name, content: content, creationDate: nil, modificationDate: nil))
+    if numItems >= 1 {
+      for i in 1...numItems {
+        if let noteData = result.atIndex(i), noteData.numberOfItems >= 2 {
+          let name = noteData.atIndex(1)?.stringValue ?? "Untitled"
+          let content = noteData.atIndex(2)?.stringValue ?? ""
+          notes.append(
+            Note(name: name, content: content, creationDate: nil, modificationDate: nil))
+        }
       }
     }
 
     guard let json = try? JSONEncoder().encode(notes),
       let jsonString = String(data: json, encoding: .utf8)
     else {
-      return "[]"
+      return Envelope.failure(.executionError, "Failed to encode notes result")
     }
     return jsonString
   }
@@ -177,10 +191,15 @@ struct SearchNotesTool: Tool {
     guard let data = args.data(using: .utf8),
       let input = try? JSONDecoder().decode(Args.self, from: data)
     else {
-      return "{\"error\": \"Invalid arguments\"}"
+      return Envelope.failure(.invalidArgs, "Invalid arguments: expected an object with a string \"query\".")
     }
 
-    let searchTerm = input.query.lowercased().replacingOccurrences(of: "\"", with: "\\\"")
+    let trimmedQuery = input.query.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedQuery.isEmpty else {
+      return Envelope.failure(.invalidArgs, "Invalid arguments: \"query\" must be a non-empty string.")
+    }
+
+    let searchTerm = AppleScriptExecutor.escapeForAppleScript(input.query.lowercased())
     let maxNotes = 50
     let maxPreview = 200
 
@@ -218,23 +237,29 @@ struct SearchNotesTool: Tool {
       """
 
     guard let result = AppleScriptExecutor.run(script) else {
-      return "[]"
+      return Envelope.failure(
+        .unavailable,
+        "Failed to execute AppleScript against Notes. The Notes app may not be running or permission was denied.",
+        retryable: false)
     }
 
     var notes: [Note] = []
     let numItems = result.numberOfItems
-    for i in 1...numItems {
-      if let noteData = result.atIndex(i), noteData.numberOfItems >= 2 {
-        let name = noteData.atIndex(1)?.stringValue ?? "Untitled"
-        let content = noteData.atIndex(2)?.stringValue ?? ""
-        notes.append(Note(name: name, content: content, creationDate: nil, modificationDate: nil))
+    if numItems >= 1 {
+      for i in 1...numItems {
+        if let noteData = result.atIndex(i), noteData.numberOfItems >= 2 {
+          let name = noteData.atIndex(1)?.stringValue ?? "Untitled"
+          let content = noteData.atIndex(2)?.stringValue ?? ""
+          notes.append(
+            Note(name: name, content: content, creationDate: nil, modificationDate: nil))
+        }
       }
     }
 
     guard let json = try? JSONEncoder().encode(notes),
       let jsonString = String(data: json, encoding: .utf8)
     else {
-      return "[]"
+      return Envelope.failure(.executionError, "Failed to encode notes result")
     }
     return jsonString
   }
@@ -269,12 +294,18 @@ struct CreateNoteTool: Tool {
     guard let data = args.data(using: .utf8),
       let input = try? JSONDecoder().decode(Args.self, from: data)
     else {
-      return "{\"success\": false, \"message\": \"Invalid arguments\"}"
+      return Envelope.failure(
+        .invalidArgs,
+        "Invalid arguments: expected an object with string \"title\" and \"body\".")
     }
 
     let title = input.title
     let body = input.body
     let folderName = input.folder ?? "Claude"
+
+    guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      return Envelope.failure(.invalidArgs, "Invalid arguments: \"title\" must be a non-empty string.")
+    }
 
     // Use temp file for body content to handle special characters correctly
     let tmpFile = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -282,15 +313,15 @@ struct CreateNoteTool: Tool {
     do {
       try body.write(to: tmpFile, atomically: true, encoding: .utf8)
     } catch {
-      return "{\"success\": false, \"message\": \"Failed to write temporary file\"}"
+      return Envelope.failure(.executionError, "Failed to write temporary file: \(error.localizedDescription)")
     }
 
     defer {
       try? FileManager.default.removeItem(at: tmpFile)
     }
 
-    let escapedTitle = title.replacingOccurrences(of: "\"", with: "\\\"")
-    let escapedFolder = folderName.replacingOccurrences(of: "\"", with: "\\\"")
+    let escapedTitle = AppleScriptExecutor.escapeForAppleScript(title)
+    let escapedFolder = AppleScriptExecutor.escapeForAppleScript(folderName)
     let tmpPath = tmpFile.path
 
     let script = """
@@ -341,7 +372,10 @@ struct CreateNoteTool: Tool {
       """
 
     guard let result = AppleScriptExecutor.runAndGetString(script) else {
-      return "{\"success\": false, \"message\": \"AppleScript execution failed\"}"
+      return Envelope.failure(
+        .unavailable,
+        "AppleScript execution failed. The Notes app may not be running or permission was denied.",
+        retryable: false)
     }
 
     if result.hasPrefix("SUCCESS:") {
@@ -364,9 +398,59 @@ struct CreateNoteTool: Tool {
       }
     }
 
-    return "{\"success\": false, \"message\": \"Failed to parse result: \(result)\"}"
+    return Envelope.failure(.executionError, "Failed to parse result: \(result)")
   }
 }
+
+// MARK: - Manifest
+
+/// The canonical list of tools this plugin exposes. Declared at file scope so
+/// both the plugin context and the test target can reference it.
+let notesTools: [Tool] = [
+  ListNotesTool(),
+  SearchNotesTool(),
+  CreateNoteTool(),
+]
+
+/// Builds the plugin manifest JSON from a list of tools. Extracted to file
+/// scope (out of the C ABI closure) so it is unit-testable.
+func buildNotesManifestJSON(tools: [Tool] = notesTools) -> String {
+  let toolsJson = tools.map { tool -> String in
+    let requirementsJson =
+      "[" + tool.requirements.map { "\"\($0)\"" }.joined(separator: ", ") + "]"
+    let widgetField = tool.widget ? "\"widget\": true," : ""
+    return """
+      {
+          "id": "\(tool.id)",
+          \(widgetField)
+          "description": "\(tool.description)",
+          "parameters": \(tool.parameters),
+          "requirements": \(requirementsJson),
+          "permission_policy": "ask"
+      }
+      """
+  }.joined(separator: ",")
+
+  return """
+    {
+      "plugin_id": "osaurus.notes",
+      "name": "Apple Notes",
+      "description": "Integration with Apple Notes",
+      "license": "MIT",
+      "authors": ["Dinoki Labs"],
+      "min_macos": "13.0",
+      "min_osaurus": "0.5.0",
+      "capabilities": {
+        "tools": [
+          \(toolsJson)
+        ]
+      }
+    }
+    """
+}
+
+/// The fully-rendered plugin manifest JSON.
+let notesManifestJSON: String = buildNotesManifestJSON()
 
 // MARK: - C ABI surface
 
@@ -399,13 +483,8 @@ private class PluginContext {
   let tools: [String: Tool]
 
   init() {
-    let toolsList: [Tool] = [
-      ListNotesTool(),
-      SearchNotesTool(),
-      CreateNoteTool(),
-    ]
     var dict: [String: Tool] = [:]
-    for t in toolsList {
+    for t in notesTools {
       dict[t.id] = t
     }
     self.tools = dict
@@ -437,43 +516,8 @@ private var api: osr_plugin_api = {
   }
 
   api.get_manifest = { ctxPtr in
-    guard let ctxPtr = ctxPtr else { return nil }
-    let ctx = Unmanaged<PluginContext>.fromOpaque(ctxPtr).takeUnretainedValue()
-
-    // Build tools JSON
-    let toolsJson = ctx.tools.values.map { tool -> String in
-      let requirementsJson =
-        "[" + tool.requirements.map { "\"\($0)\"" }.joined(separator: ", ") + "]"
-      let widgetField = tool.widget ? "\"widget\": true," : ""
-      return """
-        {
-            "id": "\(tool.id)",
-            \(widgetField)
-            "description": "\(tool.description)",
-            "parameters": \(tool.parameters),
-            "requirements": \(requirementsJson),
-            "permission_policy": "ask"
-        }
-        """
-    }.joined(separator: ",")
-
-    let manifest = """
-      {
-        "plugin_id": "osaurus.notes",
-        "name": "Apple Notes",
-        "description": "Integration with Apple Notes",
-        "license": "MIT",
-        "authors": ["Dinoki Labs"],
-        "min_macos": "13.0",
-        "min_osaurus": "0.5.0",
-        "capabilities": {
-          "tools": [
-            \(toolsJson)
-          ]
-        }
-      }
-      """
-    return makeCString(manifest)
+    guard ctxPtr != nil else { return nil }
+    return makeCString(notesManifestJSON)
   }
 
   api.invoke = { ctxPtr, typePtr, idPtr, payloadPtr in
@@ -493,7 +537,8 @@ private var api: osr_plugin_api = {
       return makeCString(result)
     }
 
-    return makeCString("{\"error\": \"Unknown capability or tool\"}")
+    return makeCString(
+      Envelope.failure(.notFound, "Unknown capability or tool: \(type)/\(id)"))
   }
 
   return api
