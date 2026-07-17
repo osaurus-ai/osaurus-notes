@@ -45,7 +45,8 @@ final class NotesTests: XCTestCase {
       try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
     XCTAssertEqual(obj["ok"] as? Bool, false)
     XCTAssertEqual(obj["kind"] as? String, "invalid_args")
-    XCTAssertEqual(obj["retryable"] as? Bool, true)
+    // invalid_args is deterministic — retrying the same arguments cannot succeed
+    XCTAssertEqual(obj["retryable"] as? Bool, false)
     XCTAssertEqual(obj["message"] as? String, "x")
   }
 
@@ -55,7 +56,9 @@ final class NotesTests: XCTestCase {
     }
     XCTAssertEqual(try decode(Envelope.failure(.executionError, "m"))["retryable"] as? Bool, true)
     XCTAssertEqual(try decode(Envelope.failure(.unavailable, "m"))["retryable"] as? Bool, true)
+    XCTAssertEqual(try decode(Envelope.failure(.timeout, "m"))["retryable"] as? Bool, true)
     XCTAssertEqual(try decode(Envelope.failure(.notFound, "m"))["retryable"] as? Bool, false)
+    XCTAssertEqual(try decode(Envelope.failure(.invalidArgs, "m"))["retryable"] as? Bool, false)
   }
 
   func testFailureExplicitRetryableOverridesDefault() throws {
