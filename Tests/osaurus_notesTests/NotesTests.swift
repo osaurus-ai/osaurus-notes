@@ -12,6 +12,7 @@ final class NotesTests: XCTestCase {
     let manifest = try XCTUnwrap(obj, "Manifest must be a JSON object")
 
     XCTAssertEqual(manifest["plugin_id"] as? String, "osaurus.notes")
+    XCTAssertEqual(manifest["version"] as? String, "1.0.4")
 
     let capabilities = try XCTUnwrap(manifest["capabilities"] as? [String: Any])
     let tools = try XCTUnwrap(capabilities["tools"] as? [[String: Any]])
