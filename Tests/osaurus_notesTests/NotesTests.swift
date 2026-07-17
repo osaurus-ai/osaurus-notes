@@ -1,3 +1,4 @@
+import OsaurusPluginKit
 import XCTest
 
 @testable import osaurus_notes
@@ -85,7 +86,7 @@ final class NotesTests: XCTestCase {
   }
 
   func testSuccessRawWrapsPayload() {
-    XCTAssertEqual(Envelope.successRaw("[]"), "{\"ok\":true,\"result\":[]}")
+    XCTAssertEqual(Envelope.success(raw: "[]"), "{\"ok\":true,\"result\":[]}")
   }
 
   // MARK: - AppleScript escaping helper

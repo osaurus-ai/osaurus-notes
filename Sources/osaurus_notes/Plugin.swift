@@ -1,4 +1,6 @@
 import Foundation
+import OsaurusPluginABI
+import OsaurusPluginKit
 
 // MARK: - Models
 
@@ -46,14 +48,14 @@ class AppleScriptExecutor {
     case failure(String)
   }
 
-  /// Run an AppleScript via the shared subprocess runner (`/usr/bin/osascript`):
+  /// Run an AppleScript via the SDK's `ProcessRunner` (`/usr/bin/osascript`):
   /// output is drained concurrently, execution is bounded by `timeoutSeconds`,
   /// and captured output is capped. The previous synchronous `NSAppleScript`
   /// execution could hang the caller forever if Notes never responded.
   static func runScript(_ source: String) -> ScriptResult {
-    let result: SubprocessResult
+    let result: ProcessRunner.Output
     do {
-      result = try runSubprocess(
+      result = try ProcessRunner.run(
         executable: "/usr/bin/osascript", arguments: ["-e", source],
         timeout: timeoutSeconds)
     } catch {
@@ -71,8 +73,8 @@ class AppleScriptExecutor {
         ))
     }
 
-    if result.terminationStatus != 0 {
-      let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+    if result.exitStatus != 0 {
+      let stderr = result.stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
       let lower = stderr.lowercased()
       if lower.contains("not allowed") || lower.contains("not authorized")
         || lower.contains("permission")
@@ -90,7 +92,7 @@ class AppleScriptExecutor {
           retryable: false))
     }
 
-    return .success(result.stdout)
+    return .success(result.stdoutText)
   }
 
   /// Escapes a string so it can be safely embedded inside an AppleScript
