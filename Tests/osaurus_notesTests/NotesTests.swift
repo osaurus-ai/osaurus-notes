@@ -1,3 +1,4 @@
+import OsaurusPluginKit
 import XCTest
 
 @testable import osaurus_notes
@@ -12,6 +13,7 @@ final class NotesTests: XCTestCase {
     let manifest = try XCTUnwrap(obj, "Manifest must be a JSON object")
 
     XCTAssertEqual(manifest["plugin_id"] as? String, "osaurus.notes")
+    XCTAssertEqual(manifest["version"] as? String, "1.0.4")
 
     let capabilities = try XCTUnwrap(manifest["capabilities"] as? [String: Any])
     let tools = try XCTUnwrap(capabilities["tools"] as? [[String: Any]])
@@ -45,7 +47,8 @@ final class NotesTests: XCTestCase {
       try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
     XCTAssertEqual(obj["ok"] as? Bool, false)
     XCTAssertEqual(obj["kind"] as? String, "invalid_args")
-    XCTAssertEqual(obj["retryable"] as? Bool, true)
+    // invalid_args is deterministic — retrying the same arguments cannot succeed
+    XCTAssertEqual(obj["retryable"] as? Bool, false)
     XCTAssertEqual(obj["message"] as? String, "x")
   }
 
@@ -55,7 +58,9 @@ final class NotesTests: XCTestCase {
     }
     XCTAssertEqual(try decode(Envelope.failure(.executionError, "m"))["retryable"] as? Bool, true)
     XCTAssertEqual(try decode(Envelope.failure(.unavailable, "m"))["retryable"] as? Bool, true)
+    XCTAssertEqual(try decode(Envelope.failure(.timeout, "m"))["retryable"] as? Bool, true)
     XCTAssertEqual(try decode(Envelope.failure(.notFound, "m"))["retryable"] as? Bool, false)
+    XCTAssertEqual(try decode(Envelope.failure(.invalidArgs, "m"))["retryable"] as? Bool, false)
   }
 
   func testFailureExplicitRetryableOverridesDefault() throws {
@@ -81,7 +86,7 @@ final class NotesTests: XCTestCase {
   }
 
   func testSuccessRawWrapsPayload() {
-    XCTAssertEqual(Envelope.successRaw("[]"), "{\"ok\":true,\"result\":[]}")
+    XCTAssertEqual(Envelope.success(raw: "[]"), "{\"ok\":true,\"result\":[]}")
   }
 
   // MARK: - AppleScript escaping helper
