@@ -518,7 +518,7 @@ func buildNotesManifestJSON(tools: [Tool] = notesTools) -> String {
     {
       "plugin_id": "osaurus.notes",
       "name": "Apple Notes",
-      "version": "1.0.4",
+      "version": "1.1.0",
       "description": "Integration with Apple Notes",
       "license": "MIT",
       "authors": ["Dinoki Labs"],
