@@ -3,98 +3,163 @@ import XCTest
 
 @testable import osaurus_notes
 
-final class NotesTests: XCTestCase {
+final class NotesManifestTests: XCTestCase {
+  private func manifest() throws -> [String: Any] {
+    try XCTUnwrap(
+      JSONSerialization.jsonObject(with: Data(notesManifestJSON.utf8)) as? [String: Any]
+    )
+  }
 
-  // MARK: - Manifest
+  private func tools() throws -> [[String: Any]] {
+    let capabilities = try XCTUnwrap(try manifest()["capabilities"] as? [String: Any])
+    return try XCTUnwrap(capabilities["tools"] as? [[String: Any]])
+  }
 
-  func testManifestParsesAndToolsAreWellFormed() throws {
-    let data = Data(notesManifestJSON.utf8)
-    let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-    let manifest = try XCTUnwrap(obj, "Manifest must be a JSON object")
-
+  func testManifestDeclaresVersionTwoAndExactToolSurface() throws {
+    let manifest = try manifest()
     XCTAssertEqual(manifest["plugin_id"] as? String, "osaurus.notes")
-    XCTAssertEqual(manifest["version"] as? String, "1.1.0")
+    XCTAssertEqual(manifest["version"] as? String, "2.0.0")
+    XCTAssertEqual(
+      try tools().compactMap { $0["id"] as? String },
+      ["query_notes", "get_note", "create_note"]
+    )
+  }
 
-    let capabilities = try XCTUnwrap(manifest["capabilities"] as? [String: Any])
-    let tools = try XCTUnwrap(capabilities["tools"] as? [[String: Any]])
-    XCTAssertFalse(tools.isEmpty, "Manifest must declare at least one tool")
-
-    for tool in tools {
-      let id = try XCTUnwrap(tool["id"] as? String, "Each tool must have a string \"id\"")
-      XCTAssertFalse(id.isEmpty, "Tool id must be non-empty")
-      let description = try XCTUnwrap(
-        tool["description"] as? String, "Each tool must have a string \"description\"")
-      XCTAssertFalse(description.isEmpty, "Tool description must be non-empty")
+  func testEveryToolUsesAutomationAndAsk() throws {
+    for tool in try tools() {
+      XCTAssertEqual(tool["requirements"] as? [String], ["automation"])
+      XCTAssertEqual(tool["permission_policy"] as? String, "ask")
+      XCTAssertNil(tool["annotations"])
+      XCTAssertNil(tool["outputSchema"])
     }
   }
 
-  func testManifestContainsExpectedToolIDs() throws {
-    let data = Data(notesManifestJSON.utf8)
-    let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
-    let capabilities = try XCTUnwrap(obj["capabilities"] as? [String: Any])
-    let tools = try XCTUnwrap(capabilities["tools"] as? [[String: Any]])
-    let ids = Set(tools.compactMap { $0["id"] as? String })
-    XCTAssertEqual(ids, ["list_notes", "search_notes", "create_note"])
-  }
-
-  // MARK: - Envelope
-
-  func testInvalidArgsFailureRoundTrips() throws {
-    let json = Envelope.failure(.invalidArgs, "x")
-    XCTAssertTrue(json.hasPrefix("{\"ok\":false"), "Failure must begin with {\"ok\":false")
-
-    let obj = try XCTUnwrap(
-      try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
-    XCTAssertEqual(obj["ok"] as? Bool, false)
-    XCTAssertEqual(obj["kind"] as? String, "invalid_args")
-    // invalid_args is deterministic — retrying the same arguments cannot succeed
-    XCTAssertEqual(obj["retryable"] as? Bool, false)
-    XCTAssertEqual(obj["message"] as? String, "x")
-  }
-
-  func testFailureDefaultRetryableByKind() throws {
-    func decode(_ s: String) throws -> [String: Any] {
-      try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(s.utf8)) as? [String: Any])
+  func testEverySchemaIsStrict() throws {
+    for tool in try tools() {
+      let schema = try XCTUnwrap(tool["parameters"] as? [String: Any])
+      XCTAssertEqual(schema["type"] as? String, "object")
+      XCTAssertNotNil(schema["properties"] as? [String: Any])
+      XCTAssertNotNil(schema["required"] as? [String])
+      XCTAssertEqual(schema["additionalProperties"] as? Bool, false)
     }
-    XCTAssertEqual(try decode(Envelope.failure(.executionError, "m"))["retryable"] as? Bool, true)
-    XCTAssertEqual(try decode(Envelope.failure(.unavailable, "m"))["retryable"] as? Bool, true)
-    XCTAssertEqual(try decode(Envelope.failure(.timeout, "m"))["retryable"] as? Bool, true)
-    XCTAssertEqual(try decode(Envelope.failure(.notFound, "m"))["retryable"] as? Bool, false)
-    XCTAssertEqual(try decode(Envelope.failure(.invalidArgs, "m"))["retryable"] as? Bool, false)
   }
 
-  func testFailureExplicitRetryableOverridesDefault() throws {
-    let json = Envelope.failure(.unavailable, "m", retryable: false)
-    let obj = try XCTUnwrap(
-      try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
-    XCTAssertEqual(obj["retryable"] as? Bool, false)
-    XCTAssertEqual(obj["kind"] as? String, "unavailable")
+  func testQuerySchemaDocumentsDefaultsBoundsAndCursor() throws {
+    let queryTool = try XCTUnwrap(try tools().first { $0["id"] as? String == "query_notes" })
+    let schema = try XCTUnwrap(queryTool["parameters"] as? [String: Any])
+    let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+    let limit = try XCTUnwrap(properties["limit"] as? [String: Any])
+    XCTAssertEqual(limit["default"] as? Int, NotesContract.defaultLimit)
+    XCTAssertEqual(limit["minimum"] as? Int, 1)
+    XCTAssertEqual(limit["maximum"] as? Int, NotesContract.maximumLimit)
+    let cursor = try XCTUnwrap(properties["cursor"] as? [String: Any])
+    XCTAssertEqual(cursor["pattern"] as? String, "^[0-9]+$")
   }
 
-  func testFailureMessageWithSpecialCharsStaysValidJSON() throws {
-    let nasty = "he said \"hi\"\npath C:\\temp\ttab"
-    let json = Envelope.failure(.executionError, nasty)
-    let obj = try XCTUnwrap(
-      try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
-    XCTAssertEqual(obj["message"] as? String, nasty)
+  func testSkillIsPackagedOutsideRuntimeManifest() throws {
+    let capabilities = try XCTUnwrap(try manifest()["capabilities"] as? [String: Any])
+    XCTAssertNil(capabilities["skills"])
+
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let skill = try String(
+      contentsOf: repositoryRoot.appendingPathComponent("SKILL.md"),
+      encoding: .utf8)
+    XCTAssertTrue(skill.hasPrefix("---\nname: osaurus-notes\n"))
+  }
+}
+
+final class NotesValidationTests: XCTestCase {
+  private func failure(_ json: String) throws -> [String: Any] {
+    let object = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+    )
+    XCTAssertEqual(object["ok"] as? Bool, false)
+    XCTAssertEqual(object["kind"] as? String, "invalid_args")
+    XCTAssertEqual(object["retryable"] as? Bool, true)
+    return object
   }
 
-  func testEnvelopeEscape() {
-    XCTAssertEqual(Envelope.escape("a\"b"), "a\\\"b")
-    XCTAssertEqual(Envelope.escape("a\\b"), "a\\\\b")
-    XCTAssertEqual(Envelope.escape("a\nb"), "a\\nb")
+  func testQueryRejectsMalformedAndUnknownArguments() throws {
+    XCTAssertEqual(try failure(QueryNotesTool().run(args: "not json"))["tool"] as? String, "query_notes")
+    let unknown = try failure(QueryNotesTool().run(args: #"{"unexpected":true}"#))
+    XCTAssertEqual(unknown["field"] as? String, "unexpected")
   }
 
-  func testSuccessRawWrapsPayload() {
-    XCTAssertEqual(Envelope.success(raw: "[]"), "{\"ok\":true,\"result\":[]}")
+  func testQueryRejectsInvalidOptionalStrings() throws {
+    for arguments in [
+      #"{"query":""}"#,
+      #"{"folder":"  "}"#,
+      #"{"query":null}"#,
+      #"{"folder":42}"#,
+    ] {
+      _ = try failure(QueryNotesTool().run(args: arguments))
+    }
   }
 
-  // MARK: - AppleScript escaping helper
+  func testQueryRejectsOutOfRangeLimitAndInvalidCursor() throws {
+    for arguments in [
+      #"{"limit":0}"#,
+      #"{"limit":101}"#,
+      #"{"limit":2.5}"#,
+      #"{"limit":true}"#,
+      #"{"cursor":"next"}"#,
+      #"{"cursor":1}"#,
+      #"{"cursor":"99999999999999999999"}"#,
+    ] {
+      _ = try failure(QueryNotesTool().run(args: arguments))
+    }
+  }
 
-  func testAppleScriptEscapingEscapesBackslashThenQuote() {
-    XCTAssertEqual(AppleScriptExecutor.escapeForAppleScript("say \"hi\""), "say \\\"hi\\\"")
-    XCTAssertEqual(AppleScriptExecutor.escapeForAppleScript("c:\\path"), "c:\\\\path")
-    // A backslash followed by a quote must not collapse into an unescaped quote.
-    XCTAssertEqual(AppleScriptExecutor.escapeForAppleScript("\\\""), "\\\\\\\"")
+  func testGetNoteRequiresStrictStableID() throws {
+    for arguments in [
+      #"{}"#,
+      #"{"id":""}"#,
+      #"{"id":null}"#,
+      #"{"id":4}"#,
+      #"{"id":"x","title":"extra"}"#,
+    ] {
+      let result = try failure(GetNoteTool().run(args: arguments))
+      XCTAssertEqual(result["tool"] as? String, "get_note")
+    }
+  }
+
+  func testCreateNoteValidatesBeforeAutomation() throws {
+    for arguments in [
+      #"{}"#,
+      #"{"title":"","body":"x"}"#,
+      #"{"title":"x","body":null}"#,
+      #"{"title":"x","body":"","folder":""}"#,
+      #"{"title":"x","body":"","extra":true}"#,
+    ] {
+      let result = try failure(CreateNoteTool().run(args: arguments))
+      XCTAssertEqual(result["tool"] as? String, "create_note")
+    }
+  }
+}
+
+final class NotesEnvelopeTests: XCTestCase {
+  func testSuccessEnvelopeIsExplicitAndCanonical() throws {
+    let json = successEnvelope(CreateNoteResult(id: "note-id", folder: "Notes"), tool: "create_note")
+    let envelope = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+    )
+    XCTAssertEqual(envelope["ok"] as? Bool, true)
+    XCTAssertEqual(envelope["tool"] as? String, "create_note")
+    let result = try XCTUnwrap(envelope["result"] as? [String: Any])
+    XCTAssertEqual(result["id"] as? String, "note-id")
+    XCTAssertEqual(result["folder"] as? String, "Notes")
+  }
+
+  func testCanonicalUnavailableKindComesFromSDK() throws {
+    let json = Envelope.failure(.unavailable, "Notes unavailable", tool: "get_note")
+    let envelope = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+    )
+    XCTAssertEqual(envelope["kind"] as? String, "unavailable")
+    XCTAssertEqual(envelope["retryable"] as? Bool, true)
+    XCTAssertEqual(envelope["tool"] as? String, "get_note")
   }
 }
