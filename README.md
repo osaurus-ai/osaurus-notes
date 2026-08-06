@@ -1,44 +1,40 @@
 # osaurus-notes
 
-An Osaurus plugin for Apple Notes.
+An Osaurus 2.0 plugin for browsing, reading, and creating Apple Notes.
 
-This plugin allows AI models in Osaurus to interact with the Apple Notes app.
+## Tools
 
-## Capabilities
+- `query_notes(query?, folder?, limit?, cursor?)` browses or searches notes and
+  returns stable IDs, titles, bounded previews, folders, timestamps, pagination
+  metadata, and a partial-failure count.
+- `get_note(id)` returns a note's complete body and metadata by stable ID.
+- `create_note(title, body, folder?)` creates a note and returns its stable ID
+  and actual destination folder.
 
-The plugin exposes the following tools:
+Use `query_notes` for discovery and `get_note` only for notes whose full content
+is needed. An explicit folder must already exist; missing folders return
+`not_found`. Omitting `folder` lets Notes choose its default destination.
 
-- `list_notes`: Get a list of notes (with content preview).
-- `search_notes`: Find notes by text search.
-- `create_note`: Create a new note (optionally in a specific folder).
+All results use explicit canonical Osaurus success or failure envelopes.
+Arguments and result fields use snake_case.
 
-## Requirements
+## Requirements and permissions
 
-- macOS
-- Apple Notes app
-- Osaurus app must have permission to control Notes (via Automation permissions in System Settings).
+- macOS 13 or newer
+- Apple Notes
+- Automation permission for Osaurus to control Notes
+
+Every tool retains the `ask` permission policy because reading or mutating
+personal notes through Apple Events is approval-sensitive.
 
 ## Development
 
-1. Build:
+```bash
+swift package resolve
+swift build -c release --product osaurus-notes
+swift test
+```
 
-   ```bash
-   swift build -c release
-   ```
-
-2. Package (for distribution):
-   The release workflow automatically creates a zip file named `osaurus-notes-<version>.zip`.
-
-   To manually package:
-
-   ```bash
-   cp .build/release/libosaurus-notes.dylib ./libosaurus-notes.dylib
-   zip osaurus-notes-0.1.0.zip libosaurus-notes.dylib
-   ```
-
-3. Install locally:
-   Load the plugin in Osaurus using the `osaurus-notes-0.1.0.zip` file.
-
-## Permissions
-
-On the first use, macOS will prompt you to allow Osaurus (or the terminal running it) to control "Notes". You must allow this for the plugin to function.
+The release workflow packages the dynamic library together with `README.md` and
+`SKILL.md`. See [MIGRATION-2.0.md](MIGRATION-2.0.md) for breaking changes from
+1.x.

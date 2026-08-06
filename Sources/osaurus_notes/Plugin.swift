@@ -2,514 +2,513 @@ import Foundation
 import OsaurusPluginABI
 import OsaurusPluginKit
 
-// MARK: - Models
+// MARK: - Result models
 
-struct Note: Codable {
-  let name: String
-  let content: String
-  let creationDate: String?
-  let modificationDate: String?
+struct NoteSummary: Codable, Equatable {
+  let id: String
+  let title: String
+  let preview: String
+  let previewTruncated: Bool
+  let folder: String
+  let createdAt: String?
+  let modifiedAt: String?
+
+  enum CodingKeys: String, CodingKey {
+    case id
+    case title
+    case preview
+    case previewTruncated = "preview_truncated"
+    case folder
+    case createdAt = "created_at"
+    case modifiedAt = "modified_at"
+  }
 }
 
-struct NotesListResult: Codable {
-  let notes: [Note]
-  /// Number of notes that could not be read (per-note AppleScript failures).
-  /// Nonzero means the list is incomplete.
+struct QueryNotesResult: Codable, Equatable {
+  let notes: [NoteSummary]
+  let returned: Int
+  let total: Int
+  let truncated: Bool
+  let nextCursor: String?
   let partialFailureCount: Int
 
   enum CodingKeys: String, CodingKey {
     case notes
+    case returned
+    case total
+    case truncated
+    case nextCursor = "next_cursor"
     case partialFailureCount = "partial_failure_count"
   }
 }
 
-struct CreateNoteResult: Codable {
-  let success: Bool
-  let note: Note?
-  let message: String?
-  let folderName: String?
-  let usedDefaultFolder: Bool?
-}
+struct NoteDetail: Codable, Equatable {
+  let id: String
+  let title: String
+  let body: String
+  let folder: String
+  let createdAt: String?
+  let modifiedAt: String?
 
-struct FolderNotesResult: Codable {
-  let success: Bool
-  let notes: [Note]?
-  let message: String?
-}
-
-// MARK: - AppleScript Helper
-
-class AppleScriptExecutor {
-  static let timeoutSeconds: TimeInterval = 30
-
-  enum ScriptResult {
-    case success(String)
-    /// A ready-to-return canonical failure envelope.
-    case failure(String)
+  enum CodingKeys: String, CodingKey {
+    case id
+    case title
+    case body
+    case folder
+    case createdAt = "created_at"
+    case modifiedAt = "modified_at"
   }
+}
 
-  /// Run an AppleScript via the SDK's `ProcessRunner` (`/usr/bin/osascript`):
-  /// output is drained concurrently, execution is bounded by `timeoutSeconds`,
-  /// and captured output is capped. The previous synchronous `NSAppleScript`
-  /// execution could hang the caller forever if Notes never responded.
-  static func runScript(_ source: String) -> ScriptResult {
-    let result: ProcessRunner.Output
+struct CreateNoteResult: Codable, Equatable {
+  let id: String
+  let folder: String
+}
+
+// MARK: - AppleScript execution
+
+enum AppleScriptExecutor {
+  static let timeoutSeconds: TimeInterval = 30
+  static let maximumOutputBytes = 16 * 1024 * 1024
+
+  static func runScript(_ source: String, tool: String) throws -> String {
+    let output: ProcessRunner.Output
     do {
-      result = try ProcessRunner.run(
-        executable: "/usr/bin/osascript", arguments: ["-e", source],
-        timeout: timeoutSeconds)
+      output = try ProcessRunner.run(
+        executable: "/usr/bin/osascript",
+        arguments: ["-e", source],
+        timeout: timeoutSeconds,
+        maxOutputBytes: maximumOutputBytes
+      )
     } catch {
-      return .failure(
-        Envelope.failure(
-          .unavailable, "Failed to execute AppleScript: \(error.localizedDescription)",
-          retryable: false))
+      throw EnvelopeFailure(
+        .unavailable,
+        "Failed to start AppleScript: \(error.localizedDescription)",
+        retryable: false,
+        tool: tool
+      )
     }
 
-    if result.timedOut {
-      return .failure(
-        Envelope.failure(
-          .timeout,
-          "AppleScript did not finish within \(Int(timeoutSeconds)) seconds and was terminated. Notes may be busy — try again."
-        ))
+    if output.timedOut {
+      throw EnvelopeFailure(
+        .timeout,
+        "Apple Notes did not respond within \(Int(timeoutSeconds)) seconds",
+        tool: tool
+      )
     }
 
-    if result.exitStatus != 0 {
-      let stderr = result.stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
+    if output.exitStatus != 0 {
+      let stderr = output.stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
       let lower = stderr.lowercased()
       if lower.contains("not allowed") || lower.contains("not authorized")
-        || lower.contains("permission")
+        || lower.contains("permission") || lower.contains("-1743")
       {
-        return .failure(
-          Envelope.failure(
-            .unavailable,
-            "Automation permission denied for Notes. Grant access in System Settings → Privacy & Security → Automation.",
-            retryable: false))
+        throw EnvelopeFailure(
+          .userDenied,
+          "Automation permission for Notes was denied. Grant access in System Settings → Privacy & Security → Automation.",
+          tool: tool
+        )
       }
-      return .failure(
-        Envelope.failure(
+      if lower.contains("isn't running") || lower.contains("is not running")
+        || lower.contains("connection is invalid") || lower.contains("can't get application")
+      {
+        throw EnvelopeFailure(
           .unavailable,
-          "AppleScript against Notes failed: \(stderr.isEmpty ? "unknown error" : stderr). The Notes app may not be running or permission was denied.",
-          retryable: false))
+          "Apple Notes is unavailable: \(stderr.isEmpty ? "unknown error" : stderr)",
+          tool: tool
+        )
+      }
+      throw EnvelopeFailure(
+        .executionError,
+        "AppleScript failed while using Notes: \(stderr.isEmpty ? "unknown error" : stderr)",
+        tool: tool
+      )
     }
 
-    return .success(result.stdoutText)
+    return output.stdoutText.trimmingCharacters(in: .newlines)
   }
 
-  /// Escapes a string so it can be safely embedded inside an AppleScript
-  /// double-quoted string literal. Backslashes must be escaped first, then
-  /// double quotes, otherwise interpolated user input can break out of the
-  /// literal and corrupt the script.
-  static func escapeForAppleScript(_ s: String) -> String {
-    return
-      s
+  static func escapeForAppleScript(_ value: String) -> String {
+    value
       .replacingOccurrences(of: "\\", with: "\\\\")
       .replacingOccurrences(of: "\"", with: "\\\"")
   }
-
 }
 
-// MARK: - Tools
+// MARK: - Tool protocol
 
 protocol Tool {
   var id: String { get }
   var description: String { get }
   var parameters: String { get }
   var requirements: [String] { get }
-  /// opt-in flag: when true, this tool appears in the dashboard's add-widget picker
-  var widget: Bool { get }
   func run(args: String) -> String
 }
 
 extension Tool {
-  var widget: Bool { false }
+  var requirements: [String] { ["automation"] }
+
+  func handlingFailures(_ operation: () throws -> String) -> String {
+    do {
+      return try operation()
+    } catch let failure as EnvelopeFailure {
+      return renderFailure(failure, tool: id)
+    } catch {
+      return Envelope.failure(
+        .executionError,
+        "Unexpected \(id) failure: \(error.localizedDescription)",
+        tool: id
+      )
+    }
+  }
 }
 
-// Tool Definitions
+// MARK: - query_notes
 
-struct ListNotesTool: Tool {
-  let id = "list_notes"
-  let widget = true
-  let description = "Get all notes from Notes app (limited count)"
-  let parameters = """
-    {
-        "type": "object",
-        "properties": {
-            "limit": {
-                "type": "integer",
-                "description": "Maximum number of notes to return (default: 50)"
-            }
-        }
-    }
-    """
-
-  struct Args: Decodable {
-    let limit: Int?
-  }
-
-  var requirements: [String] {
-    return ["notes"]
-  }
+struct QueryNotesTool: Tool {
+  let id = "query_notes"
+  let description =
+    "Browse or search Apple Notes with optional exact-folder filtering and cursor pagination. Returns metadata and previews; use get_note for full bodies."
+  let parameters = NotesContract.queryNotesParameters
 
   func run(args: String) -> String {
-    var limit = 50
-    let trimmedArgs = args.trimmingCharacters(in: .whitespacesAndNewlines)
-    if !trimmedArgs.isEmpty {
-      guard let data = trimmedArgs.data(using: .utf8),
-        let input = try? JSONDecoder().decode(Args.self, from: data)
-      else {
-        return Envelope.failure(
-          .invalidArgs, "Invalid arguments: expected an object with an optional integer \"limit\".")
+    handlingFailures {
+      let input = try NotesArguments.object(
+        args,
+        allowed: ["query", "folder", "limit", "cursor"]
+      )
+      let query = try NotesArguments.optionalString(
+        input,
+        "query",
+        maximumLength: NotesContract.maximumQueryLength
+      )
+      let folder = try NotesArguments.optionalString(
+        input,
+        "folder",
+        maximumLength: NotesContract.maximumFolderLength
+      )
+      let limit = try NotesArguments.limit(input)
+      let offset = try NotesArguments.cursorOffset(input)
+
+      let escapedQuery = AppleScriptExecutor.escapeForAppleScript(query ?? "")
+      let escapedFolder = AppleScriptExecutor.escapeForAppleScript(folder ?? "")
+      let hasQuery = query == nil ? "false" : "true"
+      let hasFolder = folder == nil ? "false" : "true"
+
+      let script = """
+        tell application "Notes"
+            set queryText to "\(escapedQuery)"
+            set requestedFolder to "\(escapedFolder)"
+            set allNotes to notes
+
+            if \(hasFolder) then
+                set targetFolder to missing value
+                repeat with currentFolder in folders
+                    if (name of currentFolder as text) is requestedFolder then
+                        set targetFolder to currentFolder
+                        exit repeat
+                    end if
+                end repeat
+                if targetFolder is missing value then return "NOT_FOUND"
+                set allNotes to notes of targetFolder
+            end if
+
+            set output to ""
+            set failureCount to 0
+            set totalCount to 0
+            set returnedCount to 0
+
+            repeat with currentNote in allNotes
+                try
+                    set noteTitle to name of currentNote as text
+                    set noteBody to plaintext of currentNote as text
+                    set matchesQuery to true
+                    if \(hasQuery) then
+                        set matchesQuery to (noteTitle contains queryText) or (noteBody contains queryText)
+                    end if
+
+                    if matchesQuery then
+                        set currentIndex to totalCount
+                        set totalCount to totalCount + 1
+
+                        if currentIndex ≥ \(offset) and returnedCount < \(limit) then
+                            set noteID to id of currentNote as text
+                            set folderName to name of container of currentNote as text
+                            set createdDate to creation date of currentNote
+                            set modifiedDate to modification date of currentNote
+                            set wasTruncated to false
+                            set notePreview to noteBody
+                            if (length of notePreview) > \(NotesContract.previewLength) then
+                                set notePreview to (characters 1 thru \(NotesContract.previewLength) of notePreview) as text
+                                set wasTruncated to true
+                            end if
+
+                            set output to output & my encodeField(noteID) & tab & my encodeField(noteTitle) & tab & my encodeField(notePreview) & tab & my encodeField(folderName) & tab & (createdDate as «class isot» as string) & tab & (modifiedDate as «class isot» as string) & tab & (wasTruncated as text) & linefeed
+                            set returnedCount to returnedCount + 1
+                        end if
+                    end if
+                on error
+                    set failureCount to failureCount + 1
+                end try
+            end repeat
+
+            return "OK" & tab & (failureCount as text) & tab & (totalCount as text) & linefeed & output
+        end tell
+        \(appleScriptFieldEncoderHandlers)
+        """
+
+      let output = try AppleScriptExecutor.runScript(script, tool: id)
+      if output == "NOT_FOUND" {
+        throw EnvelopeFailure(
+          .notFound,
+          "Notes folder not found: \(folder ?? "")",
+          field: "folder",
+          expected: "an existing Notes folder",
+          tool: id
+        )
       }
-      if let requested = input.limit {
-        guard requested >= 1 else {
-          return Envelope.failure(
-            .invalidArgs, "Invalid arguments: \"limit\" must be a positive integer (got \(requested)).")
-        }
-        limit = min(requested, 500)
-      }
-    }
-    let maxPreview = 200
-
-    let script = """
-      tell application "Notes"
-          set output to ""
-          set failCount to 0
-          set noteCount to 0
-
-          set allNotes to notes
-
-          repeat with i from 1 to (count of allNotes)
-              if noteCount >= \(limit) then exit repeat
-
-              try
-                  set currentNote to item i of allNotes
-                  set noteName to name of currentNote
-                  set noteContent to plaintext of currentNote
-                  set dc to creation date of currentNote
-                  set dm to modification date of currentNote
-
-                  if (length of noteContent) > \(maxPreview) then
-                      set noteContent to (characters 1 thru \(maxPreview) of noteContent) as string
-                      set noteContent to noteContent & "..."
-                  end if
-
-                  set output to output & my encodeField(noteName) & tab & my encodeField(noteContent) & tab & (dc as «class isot» as string) & tab & (dm as «class isot» as string) & linefeed
-                  set noteCount to noteCount + 1
-              on error
-                  set failCount to failCount + 1
-              end try
-          end repeat
-
-          return (failCount as text) & linefeed & output
-      end tell
-      \(appleScriptFieldEncoderHandlers)
-      """
-
-    switch AppleScriptExecutor.runScript(script) {
-    case .failure(let envelope):
-      return envelope
-    case .success(let output):
-      let result = parseNotesScriptOutput(output)
-      guard let json = try? JSONEncoder().encode(result),
-        let jsonString = String(data: json, encoding: .utf8)
-      else {
-        return Envelope.failure(.executionError, "Failed to encode notes result")
-      }
-      return jsonString
+      let result = try parseQueryNotesOutput(output, offset: offset)
+      return successEnvelope(result, tool: id)
     }
   }
 }
 
-/// Parse tab-delimited, field-encoded notes output. The first line is the
-/// per-note failure count; each subsequent line is
-/// `name<tab>content<tab>creationDate<tab>modificationDate`.
-func parseNotesScriptOutput(_ output: String) -> NotesListResult {
+func parseQueryNotesOutput(_ output: String, offset: Int) throws -> QueryNotesResult {
   let lines = output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-  guard !lines.isEmpty else {
-    return NotesListResult(notes: [], partialFailureCount: 0)
+  guard let header = lines.first else {
+    throw EnvelopeFailure(.executionError, "query_notes returned no data")
   }
-  let failCount = Int(lines[0].trimmingCharacters(in: .whitespaces)) ?? 0
-  var notes: [Note] = []
-  for line in lines.dropFirst() {
-    guard !line.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
-    let parts = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
-    guard parts.count >= 2 else { continue }
-    let created = parts.count >= 3 && !parts[2].isEmpty ? parts[2] : nil
-    let modified = parts.count >= 4 && !parts[3].isEmpty ? parts[3] : nil
+  let headerFields = header.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+  guard headerFields.count == 3,
+    headerFields[0] == "OK",
+    let partialFailureCount = Int(headerFields[1]),
+    let total = Int(headerFields[2])
+  else {
+    throw EnvelopeFailure(.executionError, "query_notes returned an invalid response")
+  }
+
+  var notes: [NoteSummary] = []
+  for line in lines.dropFirst() where !line.isEmpty {
+    let fields = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+    guard fields.count == 7 else {
+      throw EnvelopeFailure(.executionError, "query_notes returned a malformed note")
+    }
     notes.append(
-      Note(
-        name: decodeAppleScriptField(parts[0]),
-        content: decodeAppleScriptField(parts[1]),
-        creationDate: created,
-        modificationDate: modified))
+      NoteSummary(
+        id: decodeAppleScriptField(fields[0]),
+        title: decodeAppleScriptField(fields[1]),
+        preview: decodeAppleScriptField(fields[2]),
+        previewTruncated: fields[6] == "true",
+        folder: decodeAppleScriptField(fields[3]),
+        createdAt: fields[4].isEmpty ? nil : fields[4],
+        modifiedAt: fields[5].isEmpty ? nil : fields[5]
+      )
+    )
   }
-  return NotesListResult(notes: notes, partialFailureCount: failCount)
+
+  let nextOffset = offset + notes.count
+  let truncated = nextOffset < total
+  return QueryNotesResult(
+    notes: notes,
+    returned: notes.count,
+    total: total,
+    truncated: truncated,
+    nextCursor: truncated ? String(nextOffset) : nil,
+    partialFailureCount: partialFailureCount
+  )
 }
 
-struct SearchNotesTool: Tool {
-  let id = "search_notes"
-  let description = "Find notes by search text"
-  let parameters = """
-    {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "Text to search for in notes"
-            }
-        },
-        "required": ["query"]
-    }
-    """
+// MARK: - get_note
 
-  struct Args: Decodable {
-    let query: String
-  }
-
-  var requirements: [String] {
-    return ["notes"]
-  }
+struct GetNoteTool: Tool {
+  let id = "get_note"
+  let description = "Read a complete Apple Note by its stable ID."
+  let parameters = NotesContract.getNoteParameters
 
   func run(args: String) -> String {
-    guard let data = args.data(using: .utf8),
-      let input = try? JSONDecoder().decode(Args.self, from: data)
-    else {
-      return Envelope.failure(.invalidArgs, "Invalid arguments: expected an object with a string \"query\".")
-    }
+    handlingFailures {
+      let input = try NotesArguments.object(args, allowed: ["id"])
+      let noteID = try NotesArguments.requiredString(input, "id", maximumLength: 2048)
+      let escapedID = AppleScriptExecutor.escapeForAppleScript(noteID)
 
-    let trimmedQuery = input.query.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmedQuery.isEmpty else {
-      return Envelope.failure(.invalidArgs, "Invalid arguments: \"query\" must be a non-empty string.")
-    }
+      let script = """
+        tell application "Notes"
+            set matchingNote to missing value
+            repeat with currentNote in notes
+                try
+                    if (id of currentNote as text) is "\(escapedID)" then
+                        set matchingNote to currentNote
+                        exit repeat
+                    end if
+                end try
+            end repeat
+            if matchingNote is missing value then return "NOT_FOUND"
 
-    let searchTerm = AppleScriptExecutor.escapeForAppleScript(input.query.lowercased())
-    let maxNotes = 50
-    let maxPreview = 200
+            set noteID to id of matchingNote as text
+            set noteTitle to name of matchingNote as text
+            set noteBody to plaintext of matchingNote as text
+            set folderName to name of container of matchingNote as text
+            set createdDate to creation date of matchingNote
+            set modifiedDate to modification date of matchingNote
+            return "OK" & tab & my encodeField(noteID) & tab & my encodeField(noteTitle) & tab & my encodeField(noteBody) & tab & my encodeField(folderName) & tab & (createdDate as «class isot» as string) & tab & (modifiedDate as «class isot» as string)
+        end tell
+        \(appleScriptFieldEncoderHandlers)
+        """
 
-    let script = """
-      tell application "Notes"
-          set output to ""
-          set failCount to 0
-          set noteCount to 0
-          set searchTerm to "\(searchTerm)"
-
-          set allNotes to notes
-
-          repeat with i from 1 to (count of allNotes)
-              if noteCount >= \(maxNotes) then exit repeat
-
-              try
-                  set currentNote to item i of allNotes
-                  set noteName to name of currentNote
-                  set noteContent to plaintext of currentNote
-
-                  if (noteName contains searchTerm) or (noteContent contains searchTerm) then
-                      set dc to creation date of currentNote
-                      set dm to modification date of currentNote
-                      if (length of noteContent) > \(maxPreview) then
-                          set noteContent to (characters 1 thru \(maxPreview) of noteContent) as string
-                          set noteContent to noteContent & "..."
-                      end if
-
-                      set output to output & my encodeField(noteName) & tab & my encodeField(noteContent) & tab & (dc as «class isot» as string) & tab & (dm as «class isot» as string) & linefeed
-                      set noteCount to noteCount + 1
-                  end if
-              on error
-                  set failCount to failCount + 1
-              end try
-          end repeat
-
-          return (failCount as text) & linefeed & output
-      end tell
-      \(appleScriptFieldEncoderHandlers)
-      """
-
-    switch AppleScriptExecutor.runScript(script) {
-    case .failure(let envelope):
-      return envelope
-    case .success(let output):
-      let result = parseNotesScriptOutput(output)
-      guard let json = try? JSONEncoder().encode(result),
-        let jsonString = String(data: json, encoding: .utf8)
-      else {
-        return Envelope.failure(.executionError, "Failed to encode notes result")
+      let output = try AppleScriptExecutor.runScript(script, tool: id)
+      if output == "NOT_FOUND" {
+        throw EnvelopeFailure(
+          .notFound,
+          "Note not found",
+          field: "id",
+          expected: "an existing Apple Notes ID",
+          tool: id
+        )
       }
-      return jsonString
+      let result = try parseGetNoteOutput(output)
+      return successEnvelope(result, tool: id)
     }
   }
 }
+
+func parseGetNoteOutput(_ output: String) throws -> NoteDetail {
+  let fields = output.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+  guard fields.count == 7, fields[0] == "OK" else {
+    throw EnvelopeFailure(.executionError, "get_note returned an invalid response")
+  }
+  return NoteDetail(
+    id: decodeAppleScriptField(fields[1]),
+    title: decodeAppleScriptField(fields[2]),
+    body: decodeAppleScriptField(fields[3]),
+    folder: decodeAppleScriptField(fields[4]),
+    createdAt: fields[5].isEmpty ? nil : fields[5],
+    modifiedAt: fields[6].isEmpty ? nil : fields[6]
+  )
+}
+
+// MARK: - create_note
 
 struct CreateNoteTool: Tool {
   let id = "create_note"
-  let description = "Create a new note"
-  let parameters = """
-    {
-        "type": "object",
-        "properties": {
-            "title": { "type": "string" },
-            "body": { "type": "string" },
-            "folder": { "type": "string", "description": "Folder name (default: Claude)" }
-        },
-        "required": ["title", "body"]
-    }
-    """
-
-  struct Args: Decodable {
-    let title: String
-    let body: String
-    let folder: String?
-  }
-
-  var requirements: [String] {
-    return ["notes"]
-  }
+  let description =
+    "Create an Apple Note, optionally in an existing exact-name folder. Returns the stable note ID and actual destination folder."
+  let parameters = NotesContract.createNoteParameters
 
   func run(args: String) -> String {
-    guard let data = args.data(using: .utf8),
-      let input = try? JSONDecoder().decode(Args.self, from: data)
-    else {
-      return Envelope.failure(
-        .invalidArgs,
-        "Invalid arguments: expected an object with string \"title\" and \"body\".")
-    }
-
-    let title = input.title
-    let body = input.body
-    let folderName = input.folder ?? "Claude"
-
-    guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-      return Envelope.failure(.invalidArgs, "Invalid arguments: \"title\" must be a non-empty string.")
-    }
-
-    // Use temp file for body content to handle special characters correctly
-    let tmpFile = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "note-content-\(UUID().uuidString).txt")
-    do {
-      try body.write(to: tmpFile, atomically: true, encoding: .utf8)
-    } catch {
-      return Envelope.failure(.executionError, "Failed to write temporary file: \(error.localizedDescription)")
-    }
-
-    defer {
-      try? FileManager.default.removeItem(at: tmpFile)
-    }
-
-    let escapedTitle = AppleScriptExecutor.escapeForAppleScript(title)
-    let escapedFolder = AppleScriptExecutor.escapeForAppleScript(folderName)
-    let tmpPath = tmpFile.path
-
-    let script = """
-      tell application "Notes"
-          set targetFolder to null
-          set folderFound to false
-          set actualFolderName to "\(escapedFolder)"
-
-          try
-              set allFolders to folders
-              repeat with currentFolder in allFolders
-                  if name of currentFolder is "\(escapedFolder)" then
-                      set targetFolder to currentFolder
-                      set folderFound to true
-                      exit repeat
-                  end if
-              end repeat
-          on error
-          end try
-
-          if not folderFound and ("\(escapedFolder)" is "Claude" or "\(escapedFolder)" is "Test-Claude") then
-              try
-                  make new folder with properties {name:"\(escapedFolder)"}
-                  set allFolders to folders
-                  repeat with currentFolder in allFolders
-                      if name of currentFolder is "\(escapedFolder)" then
-                          set targetFolder to currentFolder
-                          set folderFound to true
-                          set actualFolderName to "\(escapedFolder)"
-                          exit repeat
-                      end if
-                  end repeat
-              on error
-                  set actualFolderName to "Notes"
-              end try
-          end if
-
-          set noteContent to read file POSIX file "\(tmpPath)" as «class utf8»
-
-          if folderFound and targetFolder is not null then
-              make new note at targetFolder with properties {name:"\(escapedTitle)", body:noteContent}
-              return "SUCCESS" & tab & my encodeField(actualFolderName) & tab & "false"
-          else
-              make new note with properties {name:"\(escapedTitle)", body:noteContent}
-              return "SUCCESS" & tab & my encodeField("Notes") & tab & "true"
-          end if
-      end tell
-      \(appleScriptFieldEncoderHandlers)
-      """
-
-    let result: String
-    switch AppleScriptExecutor.runScript(script) {
-    case .failure(let envelope):
-      return envelope
-    case .success(let output):
-      result = output.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    if let parsed = parseCreateNoteResponse(result) {
-      let resultObj = CreateNoteResult(
-        success: true,
-        note: Note(name: title, content: body, creationDate: nil, modificationDate: nil),
-        message: nil,
-        folderName: parsed.folder,
-        usedDefaultFolder: parsed.usedDefault
+    handlingFailures {
+      let input = try NotesArguments.object(args, allowed: ["title", "body", "folder"])
+      let title = try NotesArguments.requiredString(
+        input,
+        "title",
+        maximumLength: NotesContract.maximumTitleLength
+      )
+      let body = try NotesArguments.requiredString(
+        input,
+        "body",
+        maximumLength: NotesContract.maximumBodyLength,
+        allowEmpty: true
+      )
+      let folder = try NotesArguments.optionalString(
+        input,
+        "folder",
+        maximumLength: NotesContract.maximumFolderLength
       )
 
-      if let json = try? JSONEncoder().encode(resultObj),
-        let jsonStr = String(data: json, encoding: .utf8)
-      {
-        return jsonStr
+      let temporaryFile = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "osaurus-note-\(UUID().uuidString).txt"
+      )
+      do {
+        try body.write(to: temporaryFile, atomically: true, encoding: .utf8)
+      } catch {
+        throw EnvelopeFailure(
+          .executionError,
+          "Failed to prepare note body: \(error.localizedDescription)",
+          retryable: false,
+          tool: id
+        )
       }
-    }
+      defer { try? FileManager.default.removeItem(at: temporaryFile) }
 
-    return Envelope.failure(.executionError, "Failed to parse result: \(result)")
+      let escapedTitle = AppleScriptExecutor.escapeForAppleScript(title)
+      let escapedFolder = AppleScriptExecutor.escapeForAppleScript(folder ?? "")
+      let escapedPath = AppleScriptExecutor.escapeForAppleScript(temporaryFile.path)
+      let hasFolder = folder == nil ? "false" : "true"
+
+      let script = """
+        tell application "Notes"
+            set requestedFolder to "\(escapedFolder)"
+            set targetFolder to missing value
+
+            if \(hasFolder) then
+                repeat with currentFolder in folders
+                    if (name of currentFolder as text) is requestedFolder then
+                        set targetFolder to currentFolder
+                        exit repeat
+                    end if
+                end repeat
+                if targetFolder is missing value then return "NOT_FOUND"
+            end if
+
+            set noteBody to read file POSIX file "\(escapedPath)" as «class utf8»
+            if \(hasFolder) then
+                set createdNote to make new note at targetFolder with properties {name:"\(escapedTitle)", body:noteBody}
+            else
+                set createdNote to make new note with properties {name:"\(escapedTitle)", body:noteBody}
+            end if
+
+            set noteID to id of createdNote as text
+            set actualFolder to name of container of createdNote as text
+            return "OK" & tab & my encodeField(noteID) & tab & my encodeField(actualFolder)
+        end tell
+        \(appleScriptFieldEncoderHandlers)
+        """
+
+      let output = try AppleScriptExecutor.runScript(script, tool: id)
+      if output == "NOT_FOUND" {
+        throw EnvelopeFailure(
+          .notFound,
+          "Notes folder not found: \(folder ?? "")",
+          field: "folder",
+          expected: "an existing Notes folder",
+          tool: id
+        )
+      }
+      let result = try parseCreateNoteOutput(output)
+      return successEnvelope(result, tool: id)
+    }
   }
 }
 
-/// Parse the tab-delimited create_note response
-/// (`SUCCESS<tab><encoded folder><tab><usedDefault>`). The folder name is
-/// field-encoded so names containing ":" or tabs cannot corrupt the response.
-func parseCreateNoteResponse(_ raw: String) -> (folder: String, usedDefault: Bool)? {
-  let parts = raw.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
-  guard parts.first == "SUCCESS" else { return nil }
-  let folder = parts.count > 1 ? decodeAppleScriptField(parts[1]) : "Notes"
-  let usedDefault = parts.count > 2 ? (parts[2] == "true") : false
-  return (folder: folder, usedDefault: usedDefault)
+func parseCreateNoteOutput(_ output: String) throws -> CreateNoteResult {
+  let fields = output.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+  guard fields.count == 3, fields[0] == "OK" else {
+    throw EnvelopeFailure(.executionError, "create_note returned an invalid response")
+  }
+  return CreateNoteResult(
+    id: decodeAppleScriptField(fields[1]),
+    folder: decodeAppleScriptField(fields[2])
+  )
 }
 
 // MARK: - Manifest
 
-/// The canonical list of tools this plugin exposes. Declared at file scope so
-/// both the plugin context and the test target can reference it.
 let notesTools: [Tool] = [
-  ListNotesTool(),
-  SearchNotesTool(),
+  QueryNotesTool(),
+  GetNoteTool(),
   CreateNoteTool(),
 ]
 
-/// Builds the plugin manifest JSON from a list of tools. Extracted to file
-/// scope (out of the C ABI closure) so it is unit-testable.
 func buildNotesManifestJSON(tools: [Tool] = notesTools) -> String {
-  let toolsJson = tools.map { tool -> String in
-    let requirementsJson =
-      "[" + tool.requirements.map { "\"\($0)\"" }.joined(separator: ", ") + "]"
-    let widgetField = tool.widget ? "\"widget\": true," : ""
+  let toolsJSON = tools.map { tool in
+    let requirementsJSON =
+      "[" + tool.requirements.map { "\"\(Envelope.escape($0))\"" }.joined(separator: ",") + "]"
     return """
       {
-          "id": "\(tool.id)",
-          \(widgetField)
-          "description": "\(tool.description)",
-          "parameters": \(tool.parameters),
-          "requirements": \(requirementsJson),
-          "permission_policy": "ask"
+        "id": "\(Envelope.escape(tool.id))",
+        "description": "\(Envelope.escape(tool.description))",
+        "parameters": \(tool.parameters),
+        "requirements": \(requirementsJSON),
+        "permission_policy": "ask"
       }
       """
   }.joined(separator: ",")
@@ -518,87 +517,72 @@ func buildNotesManifestJSON(tools: [Tool] = notesTools) -> String {
     {
       "plugin_id": "osaurus.notes",
       "name": "Apple Notes",
-      "version": "1.1.0",
-      "description": "Integration with Apple Notes",
+      "version": "\(NotesContract.version)",
+      "description": "Browse, read, and create Apple Notes by stable identifier.",
       "license": "MIT",
       "authors": ["Dinoki Labs"],
       "min_macos": "13.0",
       "min_osaurus": "0.5.0",
       "capabilities": {
-        "tools": [
-          \(toolsJson)
-        ]
+        "tools": [\(toolsJSON)]
       }
     }
     """
 }
 
-/// The fully-rendered plugin manifest JSON.
-let notesManifestJSON: String = buildNotesManifestJSON()
+let notesManifestJSON = buildNotesManifestJSON()
 
-// MARK: - C ABI surface (via osaurus-plugin-sdk)
+// MARK: - C ABI
 
-// Context state
-private class PluginContext {
+private final class PluginContext {
   let tools: [String: Tool]
 
   init() {
-    var dict: [String: Tool] = [:]
-    for t in notesTools {
-      dict[t.id] = t
-    }
-    self.tools = dict
+    tools = Dictionary(uniqueKeysWithValues: notesTools.map { ($0.id, $0) })
   }
 }
 
-// API Implementation
 private var pluginAPI = PluginEntry.makeAPI(
   version: OsrABIVersion.v2,
   init: {
-    let ctx = PluginContext()
-    return Unmanaged.passRetained(ctx).toOpaque()
+    Unmanaged.passRetained(PluginContext()).toOpaque()
   },
-  destroy: { ctxPtr in
-    guard let ctxPtr = ctxPtr else { return }
-    Unmanaged<PluginContext>.fromOpaque(ctxPtr).release()
+  destroy: { pointer in
+    guard let pointer else { return }
+    Unmanaged<PluginContext>.fromOpaque(pointer).release()
   },
-  getManifest: { ctxPtr in
-    guard ctxPtr != nil else { return nil }
+  getManifest: { pointer in
+    guard pointer != nil else { return nil }
     return osrMakeCString(notesManifestJSON)
   },
-  invoke: { ctxPtr, typePtr, idPtr, payloadPtr in
-    guard let ctxPtr = ctxPtr,
-      let typePtr = typePtr,
-      let idPtr = idPtr,
-      let payloadPtr = payloadPtr
-    else { return nil }
-
-    let ctx = Unmanaged<PluginContext>.fromOpaque(ctxPtr).takeUnretainedValue()
-    let type = String(cString: typePtr)
-    let id = String(cString: idPtr)
-    let payload = String(cString: payloadPtr)
-
-    if type == "tool", let tool = ctx.tools[id] {
-      let result = tool.run(args: payload)
-      return osrMakeCString(result)
+  invoke: { contextPointer, typePointer, idPointer, payloadPointer in
+    guard let contextPointer, let typePointer, let idPointer, let payloadPointer else {
+      return nil
     }
 
-    return osrMakeCString(
-      Envelope.failure(.notFound, "Unknown capability or tool: \(type)/\(id)"))
+    let context = Unmanaged<PluginContext>.fromOpaque(contextPointer).takeUnretainedValue()
+    let type = String(cString: typePointer)
+    let id = String(cString: idPointer)
+    let payload = String(cString: payloadPointer)
+
+    guard type == "tool", let tool = context.tools[id] else {
+      return osrMakeCString(
+        Envelope.failure(
+          .toolNotFound,
+          "Unknown capability or tool: \(type)/\(id)",
+          tool: id
+        )
+      )
+    }
+    return osrMakeCString(tool.run(args: payload))
   }
 )
 
-// MARK: - Entry Points
-
-/// ABI v2 entry: the host injects its API table, captured into
-/// `HostBridge.shared`. Newer hosts try this symbol first.
 @_cdecl("osaurus_plugin_entry_v2")
 public func osaurus_plugin_entry_v2(_ host: UnsafeRawPointer?) -> UnsafeRawPointer? {
   PluginEntry.enterV2(host, api: &pluginAPI)
 }
 
-/// Legacy ABI v1 entry — kept so old hosts (which never pass a host API)
-/// continue to load this plugin.
 @_cdecl("osaurus_plugin_entry")
 public func osaurus_plugin_entry() -> UnsafeRawPointer? {
   PluginEntry.enterV1(api: &pluginAPI)
